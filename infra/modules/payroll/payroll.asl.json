@@ -1,0 +1,242 @@
+{
+  "Comment": "Weekly payroll. Carries IDs and totals only - names and pay rates never enter execution history.",
+  "StartAt": "Collect",
+  "States": {
+    "Collect": {
+      "Type": "Task",
+      "Comment": "Read-only: approved timesheets in the period, grouped by employee",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "${collect_arn}", "Payload.$": "$" },
+      "ResultSelector": {
+        "periodStart.$": "$.Payload.periodStart",
+        "weeks.$": "$.Payload.weeks",
+        "count.$": "$.Payload.count",
+        "employees.$": "$.Payload.employees",
+        "timesheets.$": "$.Payload.timesheets"
+      },
+      "ResultPath": "$.collected",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "AnythingToPay"
+    },
+    "AnythingToPay": {
+      "Type": "Choice",
+      "Choices": [{ "Variable": "$.collected.count", "NumericEquals": 0, "Next": "NothingToPay" }],
+      "Default": "Lock"
+    },
+    "NothingToPay": { "Type": "Succeed" },
+    "Lock": {
+      "Type": "Task",
+      "Comment": "One run per period at a time; a later run only pays weeks approved since (supplemental run)",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Item": {
+          "PK": { "S.$": "States.Format('PAYROLL#{}', $.collected.periodStart)" },
+          "SK": { "S": "RUN" },
+          "status": { "S": "RUNNING" },
+          "runId": { "S.$": "$$.Execution.Name" },
+          "executionArn": { "S.$": "$$.Execution.Id" },
+          "startedAt": { "S.$": "$$.Execution.StartTime" },
+          "timesheets": { "N.$": "States.Format('{}', $.collected.count)" }
+        },
+        "ConditionExpression": "attribute_not_exists(PK) OR #s <> :running",
+        "ExpressionAttributeNames": { "#s": "status" },
+        "ExpressionAttributeValues": { ":running": { "S": "RUNNING" } }
+      },
+      "ResultPath": null,
+      "Catch": [{ "ErrorEquals": ["DynamoDB.ConditionalCheckFailedException"], "Next": "AlreadyRunning" }],
+      "Next": "CalculatePay"
+    },
+    "AlreadyRunning": { "Type": "Fail", "Error": "PayrollAlreadyRunning", "Cause": "Another payroll run for this period is in progress" },
+    "CalculatePay": {
+      "Type": "Map",
+      "ItemsPath": "$.collected.employees",
+      "ItemSelector": {
+        "employeeId.$": "$$.Map.Item.Value.employeeId",
+        "weekStarts.$": "$$.Map.Item.Value.weekStarts",
+        "runId.$": "$$.Execution.Name"
+      },
+      "MaxConcurrency": 10,
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Calculate",
+        "States": {
+          "Calculate": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": { "FunctionName": "${calculate_arn}", "Payload.$": "$" },
+            "ResultSelector": { "employeeId.$": "$.Payload.employeeId" },
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL"
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": null,
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "Export"
+    },
+    "Export": {
+      "Type": "Task",
+      "Comment": "Encrypted CSV to S3; returns totals only",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${export_arn}",
+        "Payload": { "runId.$": "$$.Execution.Name", "periodStart.$": "$.collected.periodStart" }
+      },
+      "ResultSelector": {
+        "exportKey.$": "$.Payload.exportKey",
+        "employeeCount.$": "$.Payload.employeeCount",
+        "grossCents.$": "$.Payload.grossCents"
+      },
+      "ResultPath": "$.export",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "MarkPaid"
+    },
+    "MarkPaid": {
+      "Type": "Map",
+      "Comment": "Direct DynamoDB integration - no Lambda. Idempotent: re-running for the same run is a no-op.",
+      "ItemsPath": "$.collected.timesheets",
+      "ItemSelector": {
+        "employeeId.$": "$$.Map.Item.Value.employeeId",
+        "weekStart.$": "$$.Map.Item.Value.weekStart",
+        "runId.$": "$$.Execution.Name"
+      },
+      "MaxConcurrency": 10,
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "MarkOne",
+        "States": {
+          "MarkOne": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "${table_name}",
+              "Key": {
+                "PK": { "S.$": "States.Format('EMP#{}', $.employeeId)" },
+                "SK": { "S.$": "States.Format('WEEK#{}', $.weekStart)" }
+              },
+              "UpdateExpression": "SET #s = :paid, GSI1SK = :g1, GSI2PK = :g2pk, payrollRun = :run, paidAt = :at, #v = #v + :one",
+              "ConditionExpression": "#s = :approved OR (#s = :paid AND payrollRun = :run)",
+              "ExpressionAttributeNames": { "#s": "status", "#v": "version" },
+              "ExpressionAttributeValues": {
+                ":paid": { "S": "PAID" },
+                ":approved": { "S": "APPROVED" },
+                ":g1": { "S.$": "States.Format('STATUS#PAID#WEEK#{}#EMP#{}', $.weekStart, $.employeeId)" },
+                ":g2pk": { "S": "STATUS#PAID" },
+                ":run": { "S.$": "$.runId" },
+                ":at": { "S.$": "$$.State.EnteredTime" },
+                ":one": { "N": "1" }
+              }
+            },
+            "ResultPath": null,
+            "Retry": [
+              {
+                "ErrorEquals": ["DynamoDB.ProvisionedThroughputExceededException", "DynamoDB.ThrottlingException", "DynamoDB.InternalServerErrorException"],
+                "IntervalSeconds": 1, "MaxAttempts": 5, "BackoffRate": 2, "JitterStrategy": "FULL"
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": null,
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "Close"
+    },
+    "Close": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Key": {
+          "PK": { "S.$": "States.Format('PAYROLL#{}', $.collected.periodStart)" },
+          "SK": { "S": "RUN" }
+        },
+        "UpdateExpression": "SET #s = :done, exportKey = :key, employeeCount = :n, grossCents = :g, completedAt = :at",
+        "ExpressionAttributeNames": { "#s": "status" },
+        "ExpressionAttributeValues": {
+          ":done": { "S": "COMPLETED" },
+          ":key": { "S.$": "$.export.exportKey" },
+          ":n": { "N.$": "States.Format('{}', $.export.employeeCount)" },
+          ":g": { "N.$": "States.Format('{}', $.export.grossCents)" },
+          ":at": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "PublishCompleted"
+    },
+    "PublishCompleted": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${bus_name}",
+            "Source": "timesheet.payroll",
+            "DetailType": "PayrollCompleted",
+            "Detail": {
+              "periodStart.$": "$.collected.periodStart",
+              "runId.$": "$$.Execution.Name",
+              "employeeCount.$": "$.export.employeeCount"
+            }
+          }
+        ]
+      },
+      "ResultPath": null,
+      "End": true
+    },
+    "MarkFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Key": {
+          "PK": { "S.$": "States.Format('PAYROLL#{}', $.collected.periodStart)" },
+          "SK": { "S": "RUN" }
+        },
+        "UpdateExpression": "SET #s = :failed, failedAt = :at, errorType = :e",
+        "ExpressionAttributeNames": { "#s": "status" },
+        "ExpressionAttributeValues": {
+          ":failed": { "S": "FAILED" },
+          ":at": { "S.$": "$$.State.EnteredTime" },
+          ":e": { "S.$": "$.error.Error" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "PublishFailed"
+    },
+    "PublishFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${bus_name}",
+            "Source": "timesheet.payroll",
+            "DetailType": "PayrollFailed",
+            "Detail": { "periodStart.$": "$.collected.periodStart", "runId.$": "$$.Execution.Name", "error.$": "$.error.Error" }
+          }
+        ]
+      },
+      "ResultPath": null,
+      "Next": "Failed"
+    },
+    "Failed": { "Type": "Fail", "Error": "PayrollFailed", "Cause": "See the execution's failed state and the PayrollFailed event" }
+  }
+}

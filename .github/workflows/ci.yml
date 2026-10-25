@@ -1,0 +1,81 @@
+name: ci
+
+# Static checks and unit tests. No AWS credentials are used anywhere in CI.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  terraform:
+    name: terraform fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.13"
+      - run: terraform fmt -check -recursive -diff
+      - run: terraform init -backend=false -input=false
+        working-directory: infra/environments/dev
+      - run: terraform validate -no-color
+        working-directory: infra/environments/dev
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: terraform-linters/setup-tflint@v6
+      - run: tflint --init
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
+
+  checkov:
+    name: checkov (IaC security scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          config_file: .checkov.yaml
+
+  python:
+    name: unit tests + lint + SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install ruff bandit
+      - name: ruff (lint)
+        run: ruff check src tests
+      - name: bandit (security static analysis)
+        run: bandit -r src -q
+      - name: unit tests
+        run: python -m unittest discover -s tests -v
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck (findings shown as annotations)
+        run: |
+          shellcheck -x -f json1 scripts/*.sh > shellcheck.json || true
+          jq -r '.comments[] | "::error file=\(.file),line=\(.line),col=\(.column)::SC\(.code) (\(.level)) \(.message)"' shellcheck.json
+          [ "$(jq '.comments | length' shellcheck.json)" -eq 0 ]

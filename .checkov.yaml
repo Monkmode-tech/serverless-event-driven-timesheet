@@ -1,0 +1,20 @@
+# Checkov configuration. Each repo-wide skip is a documented decision;
+# resource-specific exceptions are inline `checkov:skip` comments next to the code.
+compact: true
+quiet: true
+framework:
+  - terraform
+skip-path:
+  - .terraform
+  - .build
+skip-check:
+  # KMS key policies: "*" in a key policy means "this key"; access is scoped by
+  # principals and conditions (see infra/modules/kms).
+  - CKV_AWS_109
+  - CKV_AWS_111
+  - CKV_AWS_356
+  # Log retention is 30-365 days per log type to fit the lab budget; payroll
+  # records themselves are kept 7 years in S3.
+  - CKV_AWS_338
+  # State locking is set in backend.hcl (use_lockfile = true), not in code.
+  - CKV_TF_3

@@ -1,0 +1,8 @@
+# Copy to backend.hcl (git-ignored). The state bucket is created once by
+# github.com/Monkmode-tech/aws-secure-three-tier-platform/bootstrap.
+#   terraform init -backend-config=backend.hcl
+bucket       = "tfstate-<ACCOUNT_ID>-us-east-2"
+key          = "serverless-event-driven-timesheet/dev/terraform.tfstate"
+region       = "us-east-2"
+encrypt      = true
+use_lockfile = true

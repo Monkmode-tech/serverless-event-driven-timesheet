@@ -1,0 +1,39 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local configuration - may contain emails, domains or account IDs.
+# Commit the *.example versions only. NEVER commit AWS keys anywhere.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+backend.hcl
+
+# Secrets and keys
+*.pem
+*.key
+.env
+.env.*
+
+# Tooling
+plan.txt
+.DS_Store
+.idea/
+.vscode/
+
+# Lambda zips built by Terraform
+.build/
+__pycache__/
+*.pyc
+
+# Demo users with generated passwords (scripts/seed-users.sh)
+.demo-users.json
