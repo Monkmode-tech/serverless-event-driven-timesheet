@@ -182,6 +182,7 @@ resource "aws_iam_role_policy" "sfn" {
 }
 
 resource "aws_sfn_state_machine" "payroll" {
+  # checkov:skip=CKV_AWS_285: Execution data is deliberately excluded from logs so pay data never reaches CloudWatch; history stays in Step Functions (90 days)
   name     = "${var.name}-payroll"
   type     = "STANDARD"
   role_arn = aws_iam_role.sfn.arn
@@ -246,6 +247,7 @@ resource "aws_iam_role_policy" "scheduler" {
 }
 
 resource "aws_scheduler_schedule" "weekly" {
+  # checkov:skip=CKV_AWS_297: The schedule's only data is {"trigger":"schedule","weeks":1}; a CMK would protect nothing
   name                         = "${var.name}-weekly-payroll"
   description                  = "Run payroll for the previous week"
   schedule_expression          = "cron(0 6 ? * MON *)"
