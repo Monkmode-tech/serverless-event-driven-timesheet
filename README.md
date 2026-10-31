@@ -149,7 +149,7 @@ make test           # unit tests, no AWS needed
 
 ## Background
 
-Built by **Caleb Tetteh** (M.S. Cloud Computing Systems, UMGC; B.S. Computer Science, Georgia Tech).
+Built by **Caleb Tetteh** (M.S. Cloud Computing, UMGC; B.S. Computer Science, Georgia Tech).
 It implements the Employee Timesheet Management System I designed in CLCS 605 *Introduction to
 Cloud Computing* (Unit 5: serverless architecture, S3 Standard/Glacier tiers, CloudWatch KPIs).
 It applies the event-driven integration patterns from CLCS 625 *Applications of Cloud Computing*
